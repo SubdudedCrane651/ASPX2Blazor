@@ -17,20 +17,26 @@ element_mapping = {
 }
 
 def parse_aspx(path):
-    """Reads ASPX file, removes directives, restores ASP.NET tag names, and unwraps <form runat="server">."""
+    """Reads ASPX file, removes directives, restores ASP.NET tag names, and removes runat="server"."""
     try:
         with open(path, "r", encoding="utf-8") as f:
             raw = f.read()
+        
+        # Remove ASPX directives (e.g., <%@ Page ... %>)
         raw = re.sub(r"<%@.*%>\n?", "", raw)
+        
         soup = BeautifulSoup(raw, "html.parser")
 
+        # Restore ASP.NET control tag names
         for asp_tag in element_mapping:
             for elem in soup.find_all(asp_tag.lower()):
                 elem.name = asp_tag
 
-        for form in soup.find_all("form"):
-            if form.get("runat", "").lower() == "server":
-                form.unwrap()
+        # Remove runat="server" attributes from all tags
+        for elem in soup.find_all():
+            if "runat" in elem.attrs:
+                del elem.attrs["runat"]
+
         return soup
     except Exception as e:
         messagebox.showerror("Error", f"Failed to parse ASPX file: {e}")
@@ -51,14 +57,14 @@ def parse_cs(path):
     return events, props
 
 def convert_to_blazor(soup, events, class_props):
-    """Converts ASPX controls into Blazor components with event mappings."""
+    """Converts ASPX controls into Blazor components and generates event methods."""
     seen_props = {m.group(1) for p in class_props if (m := re.match(r"public\s+\w+\s+(\w+)", p))}
+    unique_events = set()
 
     for elm in soup.find_all():
         if elm.name in element_mapping:
             mapping = element_mapping[elm.name]
             elm.name = mapping["tag"]
-            elm.attrs.pop("runat", None)
             if "type" in mapping:
                 elm.attrs["type"] = mapping["type"]
             for asp_attr, blz_attr in mapping.get("attributes", {}).items():
@@ -66,31 +72,41 @@ def convert_to_blazor(soup, events, class_props):
                     val = elm.attrs.pop(asp_attr.lower())
                     elm.attrs[blz_attr] = val
                     if blz_attr.startswith("@onclick") and val not in seen_props:
-                        class_props.append(f"public string {val} {{ get; set; }}")
+                        #class_props.append(f"public string {val} {{ get; set; }}")
+                        unique_events.add(val)
                         seen_props.add(val)
-            if "onclick" in elm.attrs:
-                raw = elm.attrs["onclick"].strip()
-                if re.fullmatch(r"[A-Za-z_]\w*", raw) and raw in events:
-                    elm.attrs[mapping.get("event", "@onclick")] = raw
-                    del elm.attrs["onclick"]
+            # if "onclick" in elm.attrs:
+            #     raw = elm.attrs["onclick"].strip()
+            #     if re.fullmatch(r"[A-Za-z_]\w*", raw):
+            #         elm.attrs[mapping.get("event", "@onclick")] = raw
+            #         unique_events.add(raw)
+            #         del elm.attrs["onclick"]
             if "onclientclick" in elm.attrs:
                 elm.attrs["onclick"] = elm.attrs.pop("onclientclick")
+            if "text" in elm.attrs:
+                elm.string = elm.attrs.pop("text")
+   
 
-    return str(soup)
+    return str(soup), unique_events
 
-def save_blazor_file(content, events, props, out_path, route):
-    """Saves converted ASPX content into a .razor file with a dynamic preamble and @code block."""
+def save_blazor_file(content, events, props, out_path, route, unique_events):
+    """Saves converted ASPX content into a .razor file with event-based @code generation."""
     preamble = f"""@page "{route}"
-@using Home
 @inject IJSRuntime JS
 
 """
     code_block = "\n@code {\n"
+
+    # Generate private void functions for each unique @onclick event
+    for event_name in unique_events:
+        code_block += f"    private void {event_name}()\n    {{\n        // Event handler for {event_name}\n    }}\n\n"
+
     if props:
-        code_block += "\n".join(props) + "\n"
+        code_block += "    " + "\n    ".join(props) + "\n"
     if events:
-        code_block += "\n".join(events.values()) + "\n"
+        code_block += "    " + "\n    ".join(events.values()) + "\n"
     code_block += "}\n"
+
     try:
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(preamble)
@@ -108,12 +124,12 @@ def open_file():
         soup = parse_aspx(asp_path)
         if not soup:
             continue
-        html = convert_to_blazor(soup, events, props)
+        html, unique_events = convert_to_blazor(soup, events, props)
         folder = os.path.dirname(asp_path)
         base = os.path.splitext(os.path.basename(asp_path))[0]
         cap_base = base[0].upper() + base[1:]
         out_file = os.path.join(folder, cap_base + ".razor")
-        save_blazor_file(html, events, props, out_file, f"/{cap_base}")
+        save_blazor_file(html, events, props, out_file, f"/{cap_base}", unique_events)
     messagebox.showinfo("Done", "All selected files converted!")
 
 # GUI Setup
